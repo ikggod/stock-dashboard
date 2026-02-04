@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+portfolio.json
+kis_config.json
