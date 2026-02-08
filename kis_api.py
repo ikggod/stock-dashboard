@@ -10,7 +10,7 @@ import json
 class KISStockAPI:
     """한국투자증권 API 클래스"""
 
-    def __init__(self, app_key: str = None, app_secret: str = None, account_no: str = None, is_real: bool = False):
+    def __init__(self, app_key: str = None, app_secret: str = None, account_no: str = None, hts_id: str = None, is_real: bool = False):
         """
         초기화
 
@@ -18,13 +18,16 @@ class KISStockAPI:
             app_key: API 앱 키
             app_secret: API 앱 시크릿
             account_no: 계좌번호 (선택사항)
+            hts_id: HTS ID (WebSocket 필수)
             is_real: 실전투자 여부 (False=모의투자)
         """
         self.app_key = app_key
         self.app_secret = app_secret
         self.account_no = account_no
+        self.hts_id = hts_id
         self.is_real = is_real
         self.broker = None
+        self.broker_ws = None  # WebSocket 브로커
 
         # 설정 파일에서 로드
         if not app_key:
@@ -40,6 +43,7 @@ class KISStockAPI:
                     self.app_key = config.get('app_key')
                     self.app_secret = config.get('app_secret')
                     self.account_no = config.get('account_no')
+                    self.hts_id = config.get('hts_id')
                     self.is_real = config.get('is_real', False)
             except Exception as e:
                 print(f"설정 파일 로드 오류: {e}")
@@ -50,6 +54,7 @@ class KISStockAPI:
             'app_key': self.app_key,
             'app_secret': self.app_secret,
             'account_no': self.account_no,
+            'hts_id': self.hts_id,
             'is_real': self.is_real
         }
         with open('kis_config.json', 'w') as f:
@@ -164,9 +169,9 @@ def get_kis_instance():
     return _kis_instance
 
 
-def set_kis_credentials(app_key: str, app_secret: str, account_no: str = "", is_real: bool = False):
+def set_kis_credentials(app_key: str, app_secret: str, account_no: str = "", hts_id: str = "", is_real: bool = False):
     """API 키 설정"""
     global _kis_instance
-    _kis_instance = KISStockAPI(app_key, app_secret, account_no, is_real)
+    _kis_instance = KISStockAPI(app_key, app_secret, account_no, hts_id, is_real)
     _kis_instance.save_config()
     return _kis_instance.initialize()

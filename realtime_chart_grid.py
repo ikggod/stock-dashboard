@@ -5,9 +5,11 @@
 
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from stock_data import StockDataCollector
 from typing import Dict, List
+import numpy as np
+from scipy.signal import find_peaks
 
 
 class RealtimeChartGrid:
@@ -112,9 +114,19 @@ class RealtimeChartGrid:
         else:
             st.session_state[history_key] = history
 
-    def _create_chart(self, stock: Dict, current_price: float, change_info: Dict, intraday_data, height: int = 300) -> go.Figure:
+    def _create_chart(self, stock: Dict, current_price: float, change_info: Dict, intraday_data, height: int = 300, interval: str = '1d', enable_trendline: bool = False) -> go.Figure:
         """실제 주식 차트 생성 (일중 시세)"""
         fig = go.Figure()
+
+        # interval에 따라 X축 포맷 결정
+        if interval in ['1m', '5m']:
+            xaxis_tickformat = '%H:%M'  # 시간 표시
+        elif interval == '1d':
+            xaxis_tickformat = '%m/%d'  # 월/일 표시
+        elif interval == '1wk':
+            xaxis_tickformat = '%y/%m/%d'  # 년/월/일 표시 (주봉)
+        else:  # 월봉 등
+            xaxis_tickformat = '%Y-%m'  # 년-월 표시
 
         if intraday_data is not None and not intraday_data.empty:
             # 시세 데이터가 있으면 캔들스틱 차트
@@ -129,10 +141,116 @@ class RealtimeChartGrid:
                 high=df['High'],
                 low=df['Low'],
                 close=df['Close'],
-                increasing_line_color='#FF4444',
-                decreasing_line_color='#4444FF',
-                name='가격'
+                increasing_line_color='#FF4444',  # 상승 테두리
+                increasing_fillcolor='#FF4444',   # 상승 채우기
+                decreasing_line_color='#4444FF',  # 하락 테두리
+                decreasing_fillcolor='#4444FF',   # 하락 채우기
+                line=dict(width=1),               # 테두리 두께
+                name='가격',
+                hovertemplate='<b>시가</b>: %{open:,.0f}원<br>' +
+                              '<b>고가</b>: %{high:,.0f}원<br>' +
+                              '<b>저가</b>: %{low:,.0f}원<br>' +
+                              '<b>종가</b>: %{close:,.0f}원<br>' +
+                              '<extra></extra>'
             ))
+
+            # AI 추세선 예측 (enable_trendline=True일 때)
+            if enable_trendline and len(df) >= 10:
+                try:
+                    low_prices = df['Low'].values
+                    high_prices = df['High'].values
+                    price_range = high_prices.max() - low_prices.min()
+                    prominence = price_range * 0.05  # 전체 범위의 5%
+
+                    # 시간을 숫자로 변환 (선형 회귀용)
+                    time_numeric = np.arange(len(df))
+
+                    # 미래 시간 계산
+                    if interval == '1wk':
+                        time_delta = timedelta(weeks=1)
+                    elif interval == '1mo':
+                        time_delta = timedelta(days=30)
+                    elif interval == '1d':
+                        time_delta = timedelta(days=1)
+                    else:
+                        time_delta = timedelta(minutes=1)
+
+                    last_time = df[time_col].iloc[-1]
+                    future_extension = int(len(df) * 0.2)
+                    future_times = [last_time + time_delta * (i+1) for i in range(future_extension)]
+                    extended_times = list(df[time_col]) + future_times
+                    extended_time_numeric = np.arange(len(df) + future_extension)
+
+                    # 1. 지지선 (저점 연결) - 파란색
+                    trough_indices, _ = find_peaks(-low_prices, prominence=prominence, distance=5)
+                    if len(trough_indices) >= 2:
+                        trough_times = df[time_col].iloc[trough_indices]
+                        trough_prices = low_prices[trough_indices]
+                        trough_time_numeric = time_numeric[trough_indices]
+
+                        # 선형 회귀
+                        coefficients = np.polyfit(trough_time_numeric, trough_prices, 1)
+                        slope, intercept = coefficients
+                        support_line = slope * extended_time_numeric + intercept
+
+                        # 지지선 그리기 (파란색)
+                        fig.add_trace(go.Scatter(
+                            x=extended_times,
+                            y=support_line,
+                            mode='lines',
+                            line=dict(color='#4444FF', width=2, dash='solid'),
+                            name='지지선 (매수)',
+                            hovertemplate='지지: %{y:,.0f}원<extra></extra>',
+                            showlegend=True
+                        ))
+
+                        # 저점 마커
+                        fig.add_trace(go.Scatter(
+                            x=trough_times,
+                            y=trough_prices,
+                            mode='markers',
+                            marker=dict(symbol='circle', size=8, color='#4444FF', line=dict(color='white', width=2)),
+                            name='저점',
+                            hovertemplate='저점: %{y:,.0f}원<extra></extra>',
+                            showlegend=False
+                        ))
+
+                    # 2. 저항선 (고점 연결) - 빨간색
+                    peak_indices, _ = find_peaks(high_prices, prominence=prominence, distance=5)
+                    if len(peak_indices) >= 2:
+                        peak_times = df[time_col].iloc[peak_indices]
+                        peak_prices = high_prices[peak_indices]
+                        peak_time_numeric = time_numeric[peak_indices]
+
+                        # 선형 회귀
+                        coefficients = np.polyfit(peak_time_numeric, peak_prices, 1)
+                        slope, intercept = coefficients
+                        resistance_line = slope * extended_time_numeric + intercept
+
+                        # 저항선 그리기 (빨간색)
+                        fig.add_trace(go.Scatter(
+                            x=extended_times,
+                            y=resistance_line,
+                            mode='lines',
+                            line=dict(color='#FF4444', width=2, dash='solid'),
+                            name='저항선 (매도)',
+                            hovertemplate='저항: %{y:,.0f}원<extra></extra>',
+                            showlegend=True
+                        ))
+
+                        # 고점 마커
+                        fig.add_trace(go.Scatter(
+                            x=peak_times,
+                            y=peak_prices,
+                            mode='markers',
+                            marker=dict(symbol='circle', size=8, color='#FF4444', line=dict(color='white', width=2)),
+                            name='고점',
+                            hovertemplate='고점: %{y:,.0f}원<extra></extra>',
+                            showlegend=False
+                        ))
+                except Exception as e:
+                    # 추세선 그리기 실패 시 무시
+                    pass
         else:
             # 데이터가 없으면 현재가만 표시
             fig.add_trace(go.Scatter(
@@ -164,7 +282,7 @@ class RealtimeChartGrid:
                 showgrid=True,
                 gridcolor='rgba(128,128,128,0.1)',
                 showticklabels=True,
-                tickformat='%H:%M',
+                tickformat=xaxis_tickformat,  # 동적 포맷
                 zeroline=False
             ),
             yaxis=dict(
@@ -192,24 +310,44 @@ class RealtimeChartGrid:
         # 타임프레임 선택
         timeframe_key = f'timeframe_{stock_code}'
         if timeframe_key not in st.session_state:
-            st.session_state[timeframe_key] = '1분'
+            st.session_state[timeframe_key] = '주봉'
 
         # 시장 상태 확인
         is_market_open = self._is_market_open()
 
-        # 현재가 조회 (시장 열려있을 때만)
-        if is_market_open:
-            current_price = self._get_current_price(stock_code)
+        # 타임프레임 선택 (zoom out 가능하도록 충분한 기간)
+        timeframe_options = {
+            '1분': ('1m', '1d'),
+            '5분': ('5m', '1d'),
+            '일봉': ('1d', '2y'),      # 3mo → 2년
+            '주봉': ('1wk', '5y'),     # 1y → 5년
+            '월봉': ('1mo', 'max')     # 2y → 전체 기간
+        }
 
+        selected_timeframe = st.session_state[timeframe_key]
+        interval, period = timeframe_options[selected_timeframe]
+        chart_data = self._get_stock_data(stock_code, interval, period)
+
+        # 현재가 결정 로직
+        current_price = 0
+
+        if is_market_open:
+            # 장중: 실시간 현재가 우선
+            current_price = self._get_current_price(stock_code)
             if current_price > 0:
-                # 실시간 데이터 추가
                 self._update_price_history(stock_code, current_price)
-        else:
-            # 시장 닫혔을 때: 마지막 가격 사용 또는 평단가
-            if history_key in st.session_state and len(st.session_state[history_key]) > 0:
-                current_price = st.session_state[history_key][-1]['price']
-            else:
-                current_price = stock['avg_price']
+
+        # 현재가가 없거나 장 마감 시: 차트 데이터의 최신 종가 사용
+        if current_price == 0 and chart_data is not None and not chart_data.empty:
+            current_price = float(chart_data['Close'].iloc[-1])
+
+        # 그래도 없으면: 히스토리에서 가져오기
+        if current_price == 0 and history_key in st.session_state and len(st.session_state[history_key]) > 0:
+            current_price = st.session_state[history_key][-1]['price']
+
+        # 최종 fallback: 평단가 (이 경우만 손익 0)
+        if current_price == 0:
+            current_price = stock['avg_price']
 
         if current_price > 0:
             # 등락 계산
@@ -242,56 +380,91 @@ class RealtimeChartGrid:
                         unsafe_allow_html=True
                     )
 
-                # 타임프레임 선택
-                timeframe_options = {
-                    '1분': ('1m', '1d'),
-                    '5분': ('5m', '1d'),
-                    '30분': ('30m', '5d'),
-                    '1시간': ('1h', '5d'),
-                    '일봉': ('1d', '3mo'),
-                    '주봉': ('1wk', '1y'),
-                    '월봉': ('1mo', '2y')
-                }
+                # 타임프레임 선택 UI
+                timeframe_list = ['1분', '5분', '일봉', '주봉', '월봉']
 
                 selected_timeframe = st.radio(
                     "기간",
-                    options=list(timeframe_options.keys()),
-                    index=list(timeframe_options.keys()).index(st.session_state[timeframe_key]),
+                    options=timeframe_list,
+                    index=timeframe_list.index(st.session_state[timeframe_key]),
                     horizontal=True,
                     key=f"radio_{stock_code}",
                     label_visibility="collapsed"
                 )
-                st.session_state[timeframe_key] = selected_timeframe
 
-                # 선택된 타임프레임으로 데이터 가져오기
-                interval, period = timeframe_options[selected_timeframe]
-                chart_data = self._get_stock_data(stock_code, interval, period)
+                # 변경 감지 플래그
+                timeframe_changed = st.session_state[timeframe_key] != selected_timeframe
+
+                # 타임프레임이 변경되면 모든 모달 닫기
+                if timeframe_changed:
+                    # 모든 종목의 크게 보기 모달 닫기
+                    for key in list(st.session_state.keys()):
+                        if key.startswith('show_large_'):
+                            st.session_state[key] = False
+                    st.session_state[timeframe_key] = selected_timeframe
+                    st.rerun()  # 새 데이터로 차트 갱신
+                    return  # rerun 전 즉시 종료
+
+                # AI 추세선 예측 체크박스
+                trendline_key = f'trendline_{stock_code}'
+                if trendline_key not in st.session_state:
+                    st.session_state[trendline_key] = False
+
+                enable_trendline = st.checkbox(
+                    "🤖 AI 추세선 예측",
+                    value=st.session_state[trendline_key],
+                    key=f"trendline_check_{stock_code}",
+                    help="과거 저점을 분석하여 미래 추세선을 예측합니다"
+                )
+
+                # 체크박스 상태 변경 시 모든 모달 닫기
+                trendline_changed = st.session_state[trendline_key] != enable_trendline
+                if trendline_changed:
+                    for key in list(st.session_state.keys()):
+                        if key.startswith('show_large_'):
+                            st.session_state[key] = False
+                    st.session_state[trendline_key] = enable_trendline
+                    st.rerun()  # 즉시 리프레시
+                    return  # rerun 전 즉시 종료
+
+                st.session_state[trendline_key] = enable_trendline
 
                 # 차트 (작게)
-                fig_small = self._create_chart(stock, current_price, change_info, chart_data, height=250)
-                st.plotly_chart(fig_small, use_container_width=True, key=f"chart_{stock_code}")
+                fig_small = self._create_chart(stock, current_price, change_info, chart_data, height=250, interval=interval, enable_trendline=enable_trendline)
+                st.plotly_chart(fig_small, width='stretch', key=f"chart_{stock_code}")
 
                 # 크게 보기 버튼
-                if st.button("🔍 크게 보기", key=f"expand_{stock_code}", use_container_width=True):
+                if st.button("🔍 크게 보기", key=f"expand_{stock_code}", width='stretch'):
                     st.session_state[f'show_large_{stock_code}'] = True
 
-                # 추가 정보
+                # 추가 정보 (컴팩트하게)
                 info_col1, info_col2, info_col3 = st.columns(3)
                 with info_col1:
-                    st.metric("보유", f"{stock['quantity']}주", label_visibility="visible")
+                    st.markdown(f"**보유**")
+                    st.markdown(f"<span style='font-size: 1.1rem;'>{stock['quantity']:,}</span><span style='font-size: 0.85rem;'>주</span>", unsafe_allow_html=True)
                 with info_col2:
-                    st.metric("평단가", f"{stock['avg_price']:,.0f}원", label_visibility="visible")
+                    st.markdown(f"**평단가**")
+                    st.markdown(f"<span style='font-size: 1.1rem;'>{stock['avg_price']:,.0f}</span><span style='font-size: 0.85rem;'>원</span>", unsafe_allow_html=True)
                 with info_col3:
                     profit_loss = (current_price - stock['avg_price']) * stock['quantity']
-                    st.metric("평가손익", f"{profit_loss:+,.0f}원", label_visibility="visible")
+                    profit_color = '#FF4444' if profit_loss > 0 else '#4444FF' if profit_loss < 0 else '#666666'
+                    st.markdown(f"**평가손익**")
+                    st.markdown(f"<span style='font-size: 1.1rem; color: {profit_color};'>{profit_loss:+,.0f}</span><span style='font-size: 0.85rem;'>원</span>", unsafe_allow_html=True)
 
                 # 마지막 업데이트 시간
                 update_time = datetime.now().strftime('%H:%M:%S')
                 st.caption(f"업데이트: {update_time} | {'실시간 수집 중' if is_market_open else '마지막 가격 표시'}")
 
-            # 큰 화면 다이얼로그
+            # 크게 보기 데이터 저장 (dialog는 나중에 호출)
             if st.session_state.get(f'show_large_{stock_code}', False):
-                self._show_large_chart_dialog(stock, current_price, change_info, chart_data, selected_timeframe, is_market_open)
+                st.session_state[f'dialog_data_{stock_code}'] = {
+                    'stock': stock,
+                    'current_price': current_price,
+                    'change_info': change_info,
+                    'chart_data': chart_data,
+                    'timeframe': selected_timeframe,
+                    'is_market_open': is_market_open
+                }
         else:
             # 가격 조회 실패
             st.warning(f"{stock_name} ({stock_code}): 현재가 조회 실패")
@@ -301,6 +474,13 @@ class RealtimeChartGrid:
         """큰 화면 차트 다이얼로그"""
         stock_code = stock['code']
         stock_name = stock['name']
+
+        # timeframe을 interval로 변환
+        timeframe_to_interval = {
+            '1분': '1m', '5분': '5m',
+            '일봉': '1d', '주봉': '1wk', '월봉': '1mo'
+        }
+        interval = timeframe_to_interval.get(timeframe, '1d')
 
         # 헤더
         col1, col2, col3 = st.columns([2, 1, 1])
@@ -324,25 +504,45 @@ class RealtimeChartGrid:
 
         st.divider()
 
+        # AI 추세선 예측 체크박스 (작은 화면 상태 유지)
+        trendline_key = f'trendline_{stock_code}'
+        current_trendline_state = st.session_state.get(trendline_key, False)
+
+        enable_trendline_large = st.checkbox(
+            "🤖 AI 추세선 예측",
+            value=current_trendline_state,
+            key=f"trendline_check_large_{stock_code}",
+            help="과거 저점을 분석하여 미래 추세선을 예측합니다"
+        )
+
+        # 큰 화면에서 변경한 상태를 세션에 저장 (작은 화면과 동기화)
+        st.session_state[trendline_key] = enable_trendline_large
+
         # 큰 차트
-        fig_large = self._create_chart(stock, current_price, change_info, chart_data, height=600)
-        st.plotly_chart(fig_large, use_container_width=True, key=f"chart_large_{stock_code}")
+        fig_large = self._create_chart(stock, current_price, change_info, chart_data, height=600, interval=interval, enable_trendline=enable_trendline_large)
+        st.plotly_chart(fig_large, width='stretch', key=f"chart_large_{stock_code}")
 
         # 상세 정보
         info_col1, info_col2, info_col3, info_col4 = st.columns(4)
         with info_col1:
-            st.metric("보유 수량", f"{stock['quantity']}주")
+            st.markdown(f"**보유 수량**")
+            st.markdown(f"<span style='font-size: 1.3rem;'>{stock['quantity']:,}</span><span style='font-size: 0.9rem;'>주</span>", unsafe_allow_html=True)
         with info_col2:
-            st.metric("평균 단가", f"{stock['avg_price']:,.0f}원")
+            st.markdown(f"**평균 단가**")
+            st.markdown(f"<span style='font-size: 1.3rem;'>{stock['avg_price']:,.0f}</span><span style='font-size: 0.9rem;'>원</span>", unsafe_allow_html=True)
         with info_col3:
             profit_loss = (current_price - stock['avg_price']) * stock['quantity']
-            st.metric("평가 손익", f"{profit_loss:+,.0f}원")
+            profit_color = '#FF4444' if profit_loss > 0 else '#4444FF' if profit_loss < 0 else '#666666'
+            st.markdown(f"**평가 손익**")
+            st.markdown(f"<span style='font-size: 1.3rem; color: {profit_color};'>{profit_loss:+,.0f}</span><span style='font-size: 0.9rem;'>원</span>", unsafe_allow_html=True)
         with info_col4:
             profit_rate = change_info['percent']
-            st.metric("수익률", f"{profit_rate:+.2f}%")
+            rate_color = '#FF4444' if profit_rate > 0 else '#4444FF' if profit_rate < 0 else '#666666'
+            st.markdown(f"**수익률**")
+            st.markdown(f"<span style='font-size: 1.3rem; color: {rate_color};'>{profit_rate:+.2f}</span><span style='font-size: 0.9rem;'>%</span>", unsafe_allow_html=True)
 
         # 닫기 버튼
-        if st.button("닫기", use_container_width=True):
+        if st.button("닫기", width='stretch'):
             st.session_state[f'show_large_{stock_code}'] = False
             st.rerun()
 
@@ -354,6 +554,20 @@ class RealtimeChartGrid:
             stocks: 종목 리스트 (이미 정렬된 상태)
             columns: 열 개수 (기본 3열)
         """
+        # 1단계: 모든 종목의 UI 상태 변경 감지 (차트 렌더링 전)
+        any_change = False
+        for stock in stocks:
+            stock_code = stock['code']
+            timeframe_key = f'timeframe_{stock_code}'
+            trendline_key = f'trendline_{stock_code}'
+
+            # 초기화
+            if timeframe_key not in st.session_state:
+                st.session_state[timeframe_key] = '주봉'
+            if trendline_key not in st.session_state:
+                st.session_state[trendline_key] = False
+
+        # 2단계: 실제 차트 렌더링
         # 그리드 레이아웃
         for i in range(0, len(stocks), columns):
             cols = st.columns(columns)
@@ -364,3 +578,18 @@ class RealtimeChartGrid:
                     with col:
                         self.render_stock_chart(stocks[stock_idx])
                         st.divider()
+
+        # 3단계: 마지막에 열려있는 dialog만 호출 (깜빡임 방지)
+        for stock in stocks:
+            stock_code = stock['code']
+            if st.session_state.get(f'show_large_{stock_code}', False):
+                dialog_data = st.session_state.get(f'dialog_data_{stock_code}')
+                if dialog_data:
+                    self._show_large_chart_dialog(
+                        dialog_data['stock'],
+                        dialog_data['current_price'],
+                        dialog_data['change_info'],
+                        dialog_data['chart_data'],
+                        dialog_data['timeframe'],
+                        dialog_data['is_market_open']
+                    )

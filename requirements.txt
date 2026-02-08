@@ -9,3 +9,5 @@ git+https://github.com/sharebook-kr/mojito.git
 pykis>=0.7.0
 openpyxl>=3.1.0
 easyocr>=1.7.0
+scipy>=1.10.0
+numpy>=1.23.0

@@ -114,6 +114,8 @@ with st.sidebar:
         # API 키 입력
         app_key = st.text_input("App Key", value=kis.app_key or "", type="password")
         app_secret = st.text_input("App Secret", value=kis.app_secret or "", type="password")
+        hts_id = st.text_input("HTS ID (선택사항)", value=kis.hts_id or "",
+                               help="WebSocket 실시간 시세용 (선택). 없어도 시도해볼 수 있습니다.")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -124,7 +126,7 @@ with st.sidebar:
 
         if st.button("💾 API 키 저장"):
             if app_key and app_secret:
-                success = set_kis_credentials(app_key, app_secret, "", is_real)
+                success = set_kis_credentials(app_key, app_secret, "", hts_id, is_real)
                 if success:
                     st.success("✅ API 연결 성공!")
                     st.cache_data.clear()
@@ -137,12 +139,48 @@ with st.sidebar:
 
         # 연결 상태 표시
         if kis.broker:
-            st.success("🟢 실시간 시세 활성화")
-            if st.button("🔄 연결 테스트"):
-                if kis.test_connection():
-                    st.success("✅ 연결 정상!")
-                else:
-                    st.error("❌ 연결 실패")
+            st.success("🟢 REST API 활성화")
+
+            col_test1, col_test2 = st.columns(2)
+            with col_test1:
+                if st.button("🔄 연결 테스트"):
+                    if kis.test_connection():
+                        st.success("✅ 연결 정상!")
+                    else:
+                        st.error("❌ 연결 실패")
+
+            with col_test2:
+                # WebSocket 시작 버튼 (HTS ID 선택사항)
+                if st.button("🚀 WebSocket 시작"):
+                    from realtime_client import init_realtime_client
+
+                    # 보유 종목 코드 가져오기
+                    stocks = portfolio_manager.get_all_stocks()
+                    stock_codes = [stock['code'] for stock in stocks]
+
+                    if len(stock_codes) > 0:
+                        hts_id_to_use = kis.hts_id if kis.hts_id else ""
+
+                        with st.spinner('WebSocket 연결 중...'):
+                            success = init_realtime_client(
+                                kis.app_key,
+                                kis.app_secret,
+                                hts_id_to_use,
+                                stock_codes
+                            )
+                        if success:
+                            st.session_state['websocket_active'] = True
+                            st.success(f"✅ WebSocket 시작! ({len(stock_codes)}개 종목)")
+                            if not hts_id_to_use:
+                                st.info("💡 HTS ID 없이 연결 시도 중입니다.")
+                        else:
+                            st.error("❌ WebSocket 시작 실패. HTS ID가 필요할 수 있습니다.")
+                    else:
+                        st.warning("⚠️ 먼저 종목을 추가하세요")
+
+            # WebSocket 상태 표시
+            if st.session_state.get('websocket_active', False):
+                st.info("🔴 실시간 WebSocket 활성화")
         else:
             st.info("⚪ 네이버 금융 시세 사용 중 (15분 지연)")
             st.caption("API 키를 입력하면 실시간 시세로 전환됩니다")
@@ -243,7 +281,7 @@ with st.sidebar:
                     st.info(f"필요한 컬럼: {', '.join(required_columns)}")
                     st.info(f"현재 파일 컬럼: {', '.join(df.columns)}")
                 else:
-                    st.dataframe(df, use_container_width=True)
+                    st.dataframe(df, width='stretch')
                     st.info(f"총 {len(df)}개 종목")
 
                     if st.button("일괄 등록", type="primary"):
@@ -322,7 +360,7 @@ with st.sidebar:
         if uploaded_image is not None:
             # 이미지 표시
             image = Image.open(uploaded_image)
-            st.image(image, caption="업로드된 이미지", use_container_width=True)
+            st.image(image, caption="업로드된 이미지", width='stretch')
 
             if st.button("🔍 이미지 인식 시작", type="primary"):
                 with st.spinner('이미지 분석 중... (30초-1분 소요)'):
@@ -442,12 +480,12 @@ with st.sidebar:
 
             col1, col2 = st.columns([1, 1])
             with col1:
-                if st.button("🗑️ 전체 삭제", type="primary", use_container_width=True):
+                if st.button("🗑️ 전체 삭제", type="primary", width='stretch'):
                     st.session_state['confirm_delete_all'] = True
 
             if st.session_state.get('confirm_delete_all', False):
                 with col2:
-                    if st.button("✅ 정말 삭제", type="secondary", use_container_width=True):
+                    if st.button("✅ 정말 삭제", type="secondary", width='stretch'):
                         if portfolio_manager.clear_portfolio():
                             st.success(f"✅ {len(stocks)}개 종목 전체 삭제 완료!")
                             st.session_state['confirm_delete_all'] = False
@@ -574,9 +612,9 @@ def color_profit_loss(val):
     return ''
 
 # 스타일 적용
-styled_df = df.style.applymap(color_profit_loss, subset=['평가손익', '수익률'])
+styled_df = df.style.map(color_profit_loss, subset=['평가손익', '수익률'])
 
-st.dataframe(styled_df, use_container_width=True, hide_index=True)
+st.dataframe(styled_df, width='stretch', hide_index=True)
 
 st.divider()
 
@@ -671,7 +709,7 @@ with tab2:
     # 새로고침 컨트롤
     col_refresh1, col_refresh2, col_refresh3 = st.columns([1, 2, 3])
     with col_refresh1:
-        if st.button("🔄 차트 새로고침", use_container_width=True):
+        if st.button("🔄 차트 새로고침", width='stretch'):
             st.rerun()
     with col_refresh2:
         auto_refresh_chart = st.checkbox("자동 새로고침 (10초)", value=False)
