@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 portfolio.json
 kis_config.json
+node_modules/
+stock_list.json
 
 # Logs
 *.log

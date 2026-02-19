@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import os
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
@@ -10,6 +11,10 @@ from calculator import PortfolioCalculator
 from excel_template import create_smart_template
 from ocr_processor import get_ocr_instance
 from realtime_chart_grid import RealtimeChartGrid
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+from realtime_chart_component import realtime_chart
+from websocket_server import init_websocket_server
 
 # 페이지 설정
 st.set_page_config(
@@ -65,6 +70,14 @@ if 'selected_stock' not in st.session_state:
     st.session_state.selected_stock = None
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = None
+if 'selected_chosung' not in st.session_state:
+    st.session_state.selected_chosung = None
+if 'selected_alphabet' not in st.session_state:
+    st.session_state.selected_alphabet = None
+if 'search_query' not in st.session_state:
+    st.session_state.search_query = ""
+if 'selected_stocks_filter' not in st.session_state:
+    st.session_state.selected_stocks_filter = []
 
 # 매니저 초기화
 @st.cache_resource
@@ -72,24 +85,105 @@ def init_managers():
     pm = PortfolioManager()
     sdc = StockDataCollector()
     chart_grid = RealtimeChartGrid(sdc)
+
+    # WebSocket 서버 시작 (브라우저에서 직접 연결용)
+    init_websocket_server()
+
     return pm, sdc, chart_grid
 
 portfolio_manager, stock_collector, chart_grid = init_managers()
 
+# 한글 초성 추출 함수
+def get_chosung(text):
+    """한글 문자열의 첫 글자 초성을 반환"""
+    if not text:
+        return None
+
+    first_char = text[0]
+
+    # 한글 유니코드 범위 체크 (가-힣)
+    if '가' <= first_char <= '힣':
+        # 초성 리스트
+        chosung_list = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ']
+        # 한글 유니코드에서 초성 추출
+        chosung_index = (ord(first_char) - ord('가')) // 588
+        return chosung_list[chosung_index]
+
+    return None
+
+# 초성으로 필터링하는 함수
+def filter_by_chosung(stocks, chosung):
+    """초성으로 종목 필터링"""
+    if not chosung:
+        return stocks
+
+    filtered = []
+    for stock in stocks:
+        stock_chosung = get_chosung(stock['name'])
+        if stock_chosung == chosung:
+            filtered.append(stock)
+
+    return filtered
+
+# 영문으로 필터링하는 함수
+def filter_by_alphabet(stocks, alphabet):
+    """영문 알파벳으로 종목 필터링"""
+    if not alphabet:
+        return stocks
+
+    filtered = []
+    for stock in stocks:
+        first_char = stock['name'][0] if stock['name'] else ''
+        # 영문 대소문자 체크
+        if first_char.upper() == alphabet.upper():
+            filtered.append(stock)
+
+    return filtered
+
+# 검색어로 필터링하는 함수
+def filter_by_search(stocks, search_query):
+    """검색어로 종목 필터링 (종목명에 포함되는지 체크)"""
+    if not search_query:
+        return stocks
+
+    search_query_lower = search_query.lower()
+    filtered = []
+    for stock in stocks:
+        # 종목명 또는 종목코드에 검색어가 포함되어 있으면 필터링
+        if (search_query_lower in stock['name'].lower() or
+            search_query_lower in str(stock['code']).lower()):
+            filtered.append(stock)
+
+    return filtered
+
 # 현재가 조회 함수
 @st.cache_data(ttl=30)
 def get_all_current_prices(stock_codes):
-    prices = {}
-    for code in stock_codes:
-        # 종목코드를 6자리로 맞춤 (앞에 0 채우기)
-        code_fixed = str(code).zfill(6)
+    """병렬 현재가 조회 (10배 속도 향상)"""
+    import concurrent.futures
 
-        price = stock_collector.get_current_price(code_fixed, method="naver")
-        if price:
-            prices[code] = price
-        else:
-            # 디버깅: 실패한 종목 로그
-            print(f"현재가 조회 실패: {code} (수정: {code_fixed})")
+    prices = {}
+
+    def fetch_price(code):
+        """단일 종목 현재가 조회"""
+        code_fixed = str(code).zfill(6)
+        price = stock_collector.get_current_price(code_fixed, method="auto")
+        return code, price
+
+    # ThreadPoolExecutor로 병렬 조회 (최대 10개 동시)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_price, code): code for code in stock_codes}
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                code, price = future.result(timeout=5)
+                if price:
+                    prices[code] = price
+                else:
+                    print(f"현재가 조회 실패: {code}")
+            except Exception as e:
+                print(f"현재가 조회 오류 ({futures[future]}): {e}")
+
     return prices
 
 # 메인 헤더
@@ -284,12 +378,59 @@ with st.sidebar:
                     st.dataframe(df, width='stretch')
                     st.info(f"총 {len(df)}개 종목")
 
+                    # 중복 체크
+                    existing_stocks = portfolio_manager.get_all_stocks()
+                    existing_codes = {s['code'] for s in existing_stocks}
+
+                    # 엑셀 내 중복 체크
+                    excel_codes = []
+                    duplicate_in_excel = []
+                    duplicate_with_portfolio = []
+
+                    for idx, row in df.iterrows():
+                        try:
+                            code_raw = str(row['종목코드']).strip()
+                            if '.' in code_raw:
+                                code_raw = code_raw.split('.')[0]
+                            stock_code = code_raw.zfill(6)
+
+                            # 엑셀 내 중복 체크
+                            if stock_code in excel_codes:
+                                duplicate_in_excel.append(f"{row['종목명']} ({stock_code})")
+                            else:
+                                excel_codes.append(stock_code)
+
+                            # 포트폴리오와 중복 체크
+                            if stock_code in existing_codes:
+                                duplicate_with_portfolio.append(f"{row['종목명']} ({stock_code})")
+                        except:
+                            pass
+
+                    # 중복 경고 표시
+                    if duplicate_in_excel:
+                        st.warning(f"⚠️ 엑셀 파일 내 중복된 종목코드 {len(duplicate_in_excel)}개:")
+                        with st.expander("중복 종목 확인 (엑셀 내)", expanded=True):
+                            for dup in duplicate_in_excel:
+                                st.write(f"• {dup}")
+                            st.caption("→ 중복된 종목은 첫 번째 행만 등록됩니다")
+
+                    if duplicate_with_portfolio:
+                        st.error(f"❌ 포트폴리오에 이미 존재하는 종목 {len(duplicate_with_portfolio)}개:")
+                        with st.expander("중복 종목 확인 (포트폴리오)", expanded=True):
+                            for dup in duplicate_with_portfolio:
+                                st.write(f"• {dup}")
+                            st.caption("→ 이미 존재하는 종목은 등록되지 않습니다")
+
                     if st.button("일괄 등록", type="primary"):
                         success_count = 0
                         fail_count = 0
+                        skip_count = 0
 
                         progress_bar = st.progress(0)
                         status_text = st.empty()
+
+                        # 중복 방지를 위한 세트
+                        processed_codes = set()
 
                         for idx, row in df.iterrows():
                             try:
@@ -300,6 +441,15 @@ with st.sidebar:
                                 if '.' in code_raw:
                                     code_raw = code_raw.split('.')[0]  # 소수점 제거
                                 stock_code = code_raw.zfill(6)  # 6자리로 패딩
+
+                                # 중복 체크 (엑셀 내 중복 및 포트폴리오 중복)
+                                if stock_code in processed_codes or stock_code in existing_codes:
+                                    skip_count += 1
+                                    status_text.text(f"⏭️ {stock_name} 건너뜀 (중복)")
+                                    progress_bar.progress((idx + 1) / len(df))
+                                    continue
+
+                                processed_codes.add(stock_code)
 
                                 avg_price = float(row['평균단가'])
                                 quantity = int(row['보유수량'])
@@ -324,7 +474,7 @@ with st.sidebar:
                                     status_text.text(f"✅ {stock_name} 등록 완료")
                                 else:
                                     fail_count += 1
-                                    status_text.text(f"⚠️ {stock_name} 등록 실패 (중복 또는 오류)")
+                                    status_text.text(f"⚠️ {stock_name} 등록 실패 (오류)")
 
                             except Exception as e:
                                 fail_count += 1
@@ -332,7 +482,13 @@ with st.sidebar:
 
                             progress_bar.progress((idx + 1) / len(df))
 
-                        st.success(f"✅ 등록 완료: {success_count}개 / 실패: {fail_count}개")
+                        result_message = f"✅ 등록 완료: {success_count}개"
+                        if skip_count > 0:
+                            result_message += f" | 건너뜀: {skip_count}개 (중복)"
+                        if fail_count > 0:
+                            result_message += f" | 실패: {fail_count}개"
+
+                        st.success(result_message)
                         st.cache_data.clear()
                         time.sleep(2)
                         st.rerun()
@@ -499,6 +655,37 @@ with st.sidebar:
 
     st.divider()
 
+    # 차트 설정
+    st.subheader("📊 차트 설정")
+
+    # 세션 상태 초기화
+    if 'chart_height' not in st.session_state:
+        st.session_state.chart_height = 500
+    if 'chart_columns' not in st.session_state:
+        st.session_state.chart_columns = 4
+
+    chart_height = st.slider(
+        "차트 높이",
+        min_value=300,
+        max_value=800,
+        value=st.session_state.chart_height,
+        step=50,
+        help="차트를 크게 보려면 높이를 늘리세요"
+    )
+    st.session_state.chart_height = chart_height
+
+    chart_columns = st.selectbox(
+        "열 개수",
+        options=[2, 3, 4, 5],
+        index=[2, 3, 4, 5].index(st.session_state.chart_columns),
+        help="한 줄에 표시할 차트 개수"
+    )
+    st.session_state.chart_columns = chart_columns
+
+    st.caption(f"현재: {chart_columns}열 × {chart_height}px")
+
+    st.divider()
+
     # 자동 새로고침 설정
     st.subheader("🔄 자동 새로고침")
     auto_refresh = st.checkbox("30초마다 자동 새로고침", value=st.session_state.auto_refresh)
@@ -520,6 +707,43 @@ if not stocks:
     st.info("📝 사이드바에서 종목을 추가해주세요.")
     st.stop()
 
+# ========== 필터링 UI ==========
+st.subheader("🔍 종목 필터")
+
+# 검색창
+st.markdown("##### 🔎 종목 검색")
+search_query = st.text_input(
+    "종목명 또는 종목코드로 검색",
+    value=st.session_state.search_query,
+    placeholder="예: 삼성, LG, 005930",
+    key="search_input",
+    help="종목명이나 종목코드의 일부만 입력해도 검색됩니다"
+)
+st.session_state.search_query = search_query
+
+# 빠른 필터 버튼 (검색 결과를 빠르게 필터링)
+col1, col2 = st.columns([1, 5])
+with col1:
+    if st.button("🔄 전체", type="secondary", use_container_width=True, key="reset_search"):
+        st.session_state.search_query = ""
+with col2:
+    if st.session_state.search_query:
+        st.info(f"🔍 검색 중: '{st.session_state.search_query}'")
+    else:
+        st.info(f"📊 전체 {len(stocks)}개 종목 표시")
+
+st.divider()
+
+# ========== 필터링 적용 ==========
+# 검색어 필터 적용
+if st.session_state.search_query:
+    stocks = filter_by_search(stocks, st.session_state.search_query)
+
+# 필터링 후 종목이 없으면 메시지 표시
+if not stocks:
+    st.warning("⚠️ 선택한 필터에 해당하는 종목이 없습니다.")
+    st.stop()
+
 # 현재가 조회
 stock_codes = [stock['code'] for stock in stocks]
 current_prices = get_all_current_prices(stock_codes)
@@ -528,38 +752,39 @@ current_prices = get_all_current_prices(stock_codes)
 summary = PortfolioCalculator.calculate_portfolio_summary(stocks, current_prices)
 
 # 포트폴리오 요약 카드
-st.subheader("💼 포트폴리오 요약")
-col1, col2, col3, col4 = st.columns(4)
+total_stocks_count = len(portfolio_manager.get_all_stocks())
+filtered_stocks_count = len(stocks)
+
+# 컴팩트한 포트폴리오 요약 (PC 큰 화면 최적화)
+col1, col2, col3, col4, col5 = st.columns([1.5, 1.5, 1.5, 1.5, 2])
 
 with col1:
-    st.metric(
-        label="총 투자금액",
-        value=f"{summary['total_investment']:,.0f}원"
-    )
+    st.metric("투자", f"{summary['total_investment']/10000:.0f}만")
+    st.caption("총 투자금액")
 
 with col2:
-    st.metric(
-        label="현재 평가금액",
-        value=f"{summary['total_current_value']:,.0f}원"
-    )
+    st.metric("평가", f"{summary['total_current_value']/10000:.0f}만")
+    st.caption("평가금액")
 
 with col3:
     profit_loss = summary['total_profit_loss']
-    profit_loss_color = "profit" if profit_loss > 0 else "loss" if profit_loss < 0 else "neutral"
-    st.metric(
-        label="평가손익",
-        value=f"{profit_loss:,.0f}원",
-        delta=f"{profit_loss:,.0f}원"
-    )
+    st.metric("손익", f"{profit_loss/10000:+.0f}만",
+              delta=f"{profit_loss:,.0f}원")
+    st.caption("평가손익")
 
 with col4:
     return_rate = summary['total_return_rate']
-    return_rate_color = "profit" if return_rate > 0 else "loss" if return_rate < 0 else "neutral"
-    st.metric(
-        label="수익률",
-        value=f"{return_rate:+.2f}%",
-        delta=f"{return_rate:+.2f}%"
-    )
+    st.metric("수익률", f"{return_rate:+.1f}%",
+              delta=f"{return_rate:+.1f}%")
+    st.caption("전체 수익률")
+
+with col5:
+    from datetime import datetime
+    if filtered_stocks_count < total_stocks_count:
+        st.info(f"📊 종목: {filtered_stocks_count}/{total_stocks_count}개")
+    else:
+        st.info(f"📊 전체: {total_stocks_count}개 종목")
+    st.caption(f"업데이트: {datetime.now().strftime('%H:%M:%S')}")
 
 st.divider()
 
@@ -568,7 +793,10 @@ tab1, tab2 = st.tabs(["📊 포트폴리오 요약", "📈 실시간 차트 (전
 
 with tab1:
     # 종목 리스트 테이블
-    st.subheader("📊 보유 종목")
+    if filtered_stocks_count < total_stocks_count:
+        st.subheader(f"📊 보유 종목 ({filtered_stocks_count}개 표시)")
+    else:
+        st.subheader(f"📊 보유 종목 (전체 {filtered_stocks_count}개)")
 
 # 현재가 조회 실패 체크
 failed_stocks = [s for s in summary['stock_details'] if s['current_price'] == 0]
@@ -704,53 +932,107 @@ elif selected_stock_name:
 
 with tab2:
     # 실시간 차트 그리드
-    st.subheader("📈 실시간 차트 - 전체 종목")
+    if filtered_stocks_count < total_stocks_count:
+        st.subheader(f"📈 실시간 차트 ({filtered_stocks_count}개 종목)")
+    else:
+        st.subheader(f"📈 실시간 차트 (전체 {filtered_stocks_count}개 종목)")
 
     # 새로고침 컨트롤
-    col_refresh1, col_refresh2, col_refresh3 = st.columns([1, 2, 3])
+    col_refresh1, col_refresh2, col_refresh3, col_refresh4 = st.columns([1, 1, 1, 2])
     with col_refresh1:
-        if st.button("🔄 차트 새로고침", width='stretch'):
+        if st.button("🔄 새로고침", width='stretch', key="manual_refresh_chart"):
             st.rerun()
     with col_refresh2:
-        auto_refresh_chart = st.checkbox("자동 새로고침 (10초)", value=False)
+        auto_refresh_chart = st.checkbox("자동", value=True, help="자동 새로고침 활성화", key="auto_refresh_toggle")
     with col_refresh3:
-        st.caption(f"마지막 업데이트: {datetime.now().strftime('%H:%M:%S')}")
+        # 새로고침 간격 선택
+        if 'refresh_interval' not in st.session_state:
+            st.session_state.refresh_interval = 1
+        refresh_interval = st.selectbox(
+            "간격",
+            options=[0.5, 1, 2, 3, 5],
+            index=1,  # 기본 1초
+            key="refresh_interval_select",
+            help="차트 업데이트 간격 (초) - WebSocket 사용 시 0.5초 권장"
+        )
+        st.session_state.refresh_interval = refresh_interval
+    with col_refresh4:
+        current_time = datetime.now().strftime('%H:%M:%S')
 
-    st.info("💡 각 종목의 평단가는 주황색 점선으로 표시됩니다. 차트는 최근 100개 데이터 포인트를 유지합니다.")
+        # WebSocket 연결 상태 확인
+        from realtime_client import get_realtime_client
+        ws_client = get_realtime_client()
+        ws_active = ws_client is not None
+
+        if auto_refresh_chart:
+            if ws_active:
+                st.success(f"🔴 LIVE WebSocket ({refresh_interval}초) | {current_time}")
+            else:
+                st.success(f"🟢 실시간 업데이트 ({refresh_interval}초) | {current_time}")
+        else:
+            st.caption(f"⚪ 수동 모드 | {current_time}")
+
+    # WebSocket 안내 메시지
+    from realtime_client import get_realtime_client
+    ws_client = get_realtime_client()
+
+    if ws_client:
+        st.success("🔴 **LIVE 모드**: WebSocket으로 실시간 시세를 받아 차트에 표시합니다. (증권사 앱 방식)")
+    else:
+        st.info("💡 평단가는 주황색 점선으로 표시됩니다. 사이드바에서 **WebSocket을 시작**하면 진짜 실시간 모드로 전환됩니다.")
 
     # 종목을 ㄱㄴㄷ 순으로 정렬
     sorted_stocks = sorted(stocks, key=lambda x: x['name'])
 
-    # 그리드 컬럼 수 선택
-    col_config1, col_config2 = st.columns([1, 4])
-    with col_config1:
-        num_columns = st.selectbox(
-            "열 개수",
-            options=[2, 3, 4],
-            index=1,  # 기본 3열
-            help="한 줄에 표시할 차트 개수"
-        )
-    with col_config2:
-        st.caption(f"총 {len(sorted_stocks)}개 종목을 {num_columns}열로 표시")
+    # 사이드바에서 설정한 값 가져오기
+    num_columns = st.session_state.get('chart_columns', 4)
+    chart_height = st.session_state.get('chart_height', 500)
+
+    st.caption(f"📊 {len(sorted_stocks)}개 종목 | {num_columns}열 × {chart_height}px (사이드바에서 조절)")
+    st.divider()
+
+    # 실시간 차트 렌더링 방식 선택
+    use_custom_component = st.checkbox(
+        "🚀 진짜 실시간 모드 (Custom Component)",
+        value=False,
+        help="브라우저에서 직접 WebSocket 연결하여 깜빡임 0% (선택적, 빌드 필요)"
+    )
 
     st.divider()
 
-    # 차트 그리드 렌더링
-    chart_grid.render_grid(sorted_stocks, columns=num_columns)
+    if use_custom_component:
+        # Custom Component 사용 (진짜 실시간)
+        st.info("🔴 **LIVE MODE**: 브라우저가 WebSocket에 직접 연결하여 증권사 앱처럼 작동합니다.")
 
-    # 자동 새로고침
-    if auto_refresh_chart:
-        import time
-        time.sleep(10)
-        st.rerun()
+        # 그리드 레이아웃
+        for i in range(0, len(sorted_stocks), num_columns):
+            cols = st.columns(num_columns)
 
-# 자동 새로고침
-if st.session_state.auto_refresh:
-    time.sleep(30)
-    st.cache_data.clear()
-    stock_collector.clear_cache()
-    st.session_state.last_refresh = datetime.now()
-    st.rerun()
+            for j, col in enumerate(cols):
+                stock_idx = i + j
+                if stock_idx < len(sorted_stocks):
+                    stock = sorted_stocks[stock_idx]
+                    with col:
+                        # Custom Component로 실시간 차트 렌더링
+                        # 키움 서버 사용 시: ws://localhost:9999
+                        # 한투 서버 사용 시: ws://localhost:8765
+                        realtime_chart(
+                            stock_code=stock['code'],
+                            stock_name=stock['name'],
+                            avg_price=stock['avg_price'],
+                            websocket_url="ws://localhost:9999",  # 키움 서버
+                            height=300,
+                            key=f"chart_{stock['code']}"
+                        )
+    else:
+        # 기존 Fragment 방식 (폴링)
+        @st.fragment(run_every=f"{refresh_interval}s" if auto_refresh_chart else None)
+        def render_realtime_charts():
+            """실시간 차트 렌더링 (Fragment로 부분 업데이트)"""
+            chart_grid.render_grid(sorted_stocks, columns=num_columns, height=chart_height)
+
+        # 차트 렌더링
+        render_realtime_charts()
 
 # 푸터
 st.markdown("---")

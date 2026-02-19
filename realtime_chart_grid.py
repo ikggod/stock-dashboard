@@ -34,10 +34,53 @@ class RealtimeChartGrid:
         return market_open <= current_time <= market_close
 
     def _get_current_price(self, stock_code: str) -> float:
-        """현재가 조회"""
+        """현재가 조회 (WebSocket 우선, 장 종료 시 종가 제공)"""
         code_fixed = str(stock_code).zfill(6)
-        price = self.stock_collector.get_current_price(code_fixed, method="auto")
-        return price if price else 0
+        is_market_open = self._is_market_open()
+
+        if is_market_open:
+            # 장중: WebSocket → KIS REST → Naver 순서
+            from realtime_client import get_realtime_client
+            ws_client = get_realtime_client()
+            if ws_client:
+                ws_price = ws_client.get_latest_price(code_fixed)
+                if ws_price and ws_price > 0:
+                    return ws_price
+
+            # KIS REST API (실시간)
+            price = self.stock_collector.get_current_price(code_fixed, method="kis")
+            if price and price > 0:
+                return price
+
+            # Naver (15분 지연)
+            price = self.stock_collector.get_current_price(code_fixed, method="naver")
+            if price and price > 0:
+                return price
+        else:
+            # 장 종료: Naver → yfinance 순서 (당일 종가)
+            price = self.stock_collector.get_current_price(code_fixed, method="naver")
+            if price and price > 0:
+                return price
+
+            # yfinance로 당일 종가 조회
+            import yfinance as yf
+            try:
+                ticker = f"{code_fixed}.KS"
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    return float(hist['Close'].iloc[-1])
+                else:
+                    # KOSDAQ 시도
+                    ticker = f"{code_fixed}.KQ"
+                    stock = yf.Ticker(ticker)
+                    hist = stock.history(period="1d")
+                    if not hist.empty:
+                        return float(hist['Close'].iloc[-1])
+            except:
+                pass
+
+        return 0
 
     def _get_stock_data(self, stock_code: str, interval: str = "1m", period: str = "1d"):
         """주식 시세 데이터 가져오기 (yfinance)
@@ -93,10 +136,34 @@ class RealtimeChartGrid:
             'color': color
         }
 
+    def _get_websocket_history(self, stock_code: str) -> List[Dict]:
+        """WebSocket에서 받은 히스토리 데이터 가져오기"""
+        from realtime_client import get_realtime_client
+        ws_client = get_realtime_client()
+        if ws_client:
+            history = ws_client.get_history(stock_code)
+            if history:
+                return history
+        return []
+
     def _update_price_history(self, stock_code: str, current_price: float):
         """가격 히스토리 업데이트 (실시간 데이터만 쌓기)"""
         history_key = f'chart_history_{stock_code}'
 
+        # WebSocket 히스토리가 있으면 우선 사용
+        ws_history = self._get_websocket_history(stock_code)
+        if ws_history:
+            # WebSocket 데이터를 세션 상태 형식으로 변환
+            converted_history = []
+            for item in ws_history:
+                converted_history.append({
+                    'timestamp': item.get('time', ''),
+                    'price': item.get('price', 0)
+                })
+            st.session_state[history_key] = converted_history
+            return
+
+        # WebSocket 데이터가 없으면 기존 방식 사용
         # 히스토리가 없으면 생성
         if history_key not in st.session_state:
             st.session_state[history_key] = []
@@ -292,17 +359,25 @@ class RealtimeChartGrid:
                 tickformat=',.0f',
                 side='right'  # Y축을 오른쪽으로
             ),
+            # 실시간 업데이트 최적화
+            uirevision=f'chart_{stock["code"]}',  # 줌/팬 상태 유지
+            transition={'duration': 0},  # 애니메이션 제거 (즉각 업데이트)
+            hovermode='x unified',  # 호버 최적화
             plot_bgcolor='white',
             paper_bgcolor='white',
             showlegend=False,
-            hovermode='x',
             xaxis_rangeslider_visible=False  # 하단 슬라이더 제거
         )
 
         return fig
 
-    def render_stock_chart(self, stock: Dict):
-        """개별 종목 차트 렌더링"""
+    def render_stock_chart(self, stock: Dict, height: int = 400):
+        """개별 종목 차트 렌더링
+
+        Args:
+            stock: 종목 정보
+            height: 차트 높이 (기본 400px)
+        """
         stock_code = stock['code']
         stock_name = stock['name']
         history_key = f'chart_history_{stock_code}'
@@ -360,7 +435,10 @@ class RealtimeChartGrid:
 
                 with col1:
                     st.markdown(f"**{stock_name}**")
-                    market_status = "🟢 장중" if is_market_open else "🔴 장마감"
+                    if is_market_open:
+                        market_status = "🟢 장중"
+                    else:
+                        market_status = "🔴 장마감 | 종가"
                     st.caption(f"{stock_code} | {market_status}")
 
                 with col2:
@@ -402,8 +480,7 @@ class RealtimeChartGrid:
                         if key.startswith('show_large_'):
                             st.session_state[key] = False
                     st.session_state[timeframe_key] = selected_timeframe
-                    st.rerun()  # 새 데이터로 차트 갱신
-                    return  # rerun 전 즉시 종료
+                    # 세션 상태 변경으로 자동 재실행
 
                 # AI 추세선 예측 체크박스
                 trendline_key = f'trendline_{stock_code}'
@@ -424,18 +501,13 @@ class RealtimeChartGrid:
                         if key.startswith('show_large_'):
                             st.session_state[key] = False
                     st.session_state[trendline_key] = enable_trendline
-                    st.rerun()  # 즉시 리프레시
-                    return  # rerun 전 즉시 종료
+                    # 세션 상태 변경으로 자동 재실행
 
                 st.session_state[trendline_key] = enable_trendline
 
-                # 차트 (작게)
-                fig_small = self._create_chart(stock, current_price, change_info, chart_data, height=250, interval=interval, enable_trendline=enable_trendline)
+                # 차트 (사용자 설정 높이)
+                fig_small = self._create_chart(stock, current_price, change_info, chart_data, height=height, interval=interval, enable_trendline=enable_trendline)
                 st.plotly_chart(fig_small, width='stretch', key=f"chart_{stock_code}")
-
-                # 크게 보기 버튼
-                if st.button("🔍 크게 보기", key=f"expand_{stock_code}", width='stretch'):
-                    st.session_state[f'show_large_{stock_code}'] = True
 
                 # 추가 정보 (컴팩트하게)
                 info_col1, info_col2, info_col3 = st.columns(3)
@@ -455,104 +527,18 @@ class RealtimeChartGrid:
                 update_time = datetime.now().strftime('%H:%M:%S')
                 st.caption(f"업데이트: {update_time} | {'실시간 수집 중' if is_market_open else '마지막 가격 표시'}")
 
-            # 크게 보기 데이터 저장 (dialog는 나중에 호출)
-            if st.session_state.get(f'show_large_{stock_code}', False):
-                st.session_state[f'dialog_data_{stock_code}'] = {
-                    'stock': stock,
-                    'current_price': current_price,
-                    'change_info': change_info,
-                    'chart_data': chart_data,
-                    'timeframe': selected_timeframe,
-                    'is_market_open': is_market_open
-                }
         else:
             # 가격 조회 실패
             st.warning(f"{stock_name} ({stock_code}): 현재가 조회 실패")
 
-    @st.dialog("📈 차트 크게 보기", width="large")
-    def _show_large_chart_dialog(self, stock: Dict, current_price: float, change_info: Dict, chart_data, timeframe: str, is_market_open: bool):
-        """큰 화면 차트 다이얼로그"""
-        stock_code = stock['code']
-        stock_name = stock['name']
-
-        # timeframe을 interval로 변환
-        timeframe_to_interval = {
-            '1분': '1m', '5분': '5m',
-            '일봉': '1d', '주봉': '1wk', '월봉': '1mo'
-        }
-        interval = timeframe_to_interval.get(timeframe, '1d')
-
-        # 헤더
-        col1, col2, col3 = st.columns([2, 1, 1])
-
-        with col1:
-            st.markdown(f"## {stock_name} ({stock_code})")
-            market_status = "🟢 장중" if is_market_open else "🔴 장마감"
-            st.caption(f"{market_status} | {timeframe}")
-
-        with col2:
-            st.markdown(f"### {current_price:,.0f}원")
-
-        with col3:
-            arrow = "▲" if change_info['percent'] > 0 else "▼" if change_info['percent'] < 0 else "-"
-            st.markdown(
-                f"<div style='font-size: 1.5rem; color: {change_info['color']};'>"
-                f"{arrow} {change_info['amount']:+,.0f} ({change_info['percent']:+.2f}%)"
-                f"</div>",
-                unsafe_allow_html=True
-            )
-
-        st.divider()
-
-        # AI 추세선 예측 체크박스 (작은 화면 상태 유지)
-        trendline_key = f'trendline_{stock_code}'
-        current_trendline_state = st.session_state.get(trendline_key, False)
-
-        enable_trendline_large = st.checkbox(
-            "🤖 AI 추세선 예측",
-            value=current_trendline_state,
-            key=f"trendline_check_large_{stock_code}",
-            help="과거 저점을 분석하여 미래 추세선을 예측합니다"
-        )
-
-        # 큰 화면에서 변경한 상태를 세션에 저장 (작은 화면과 동기화)
-        st.session_state[trendline_key] = enable_trendline_large
-
-        # 큰 차트
-        fig_large = self._create_chart(stock, current_price, change_info, chart_data, height=600, interval=interval, enable_trendline=enable_trendline_large)
-        st.plotly_chart(fig_large, width='stretch', key=f"chart_large_{stock_code}")
-
-        # 상세 정보
-        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
-        with info_col1:
-            st.markdown(f"**보유 수량**")
-            st.markdown(f"<span style='font-size: 1.3rem;'>{stock['quantity']:,}</span><span style='font-size: 0.9rem;'>주</span>", unsafe_allow_html=True)
-        with info_col2:
-            st.markdown(f"**평균 단가**")
-            st.markdown(f"<span style='font-size: 1.3rem;'>{stock['avg_price']:,.0f}</span><span style='font-size: 0.9rem;'>원</span>", unsafe_allow_html=True)
-        with info_col3:
-            profit_loss = (current_price - stock['avg_price']) * stock['quantity']
-            profit_color = '#FF4444' if profit_loss > 0 else '#4444FF' if profit_loss < 0 else '#666666'
-            st.markdown(f"**평가 손익**")
-            st.markdown(f"<span style='font-size: 1.3rem; color: {profit_color};'>{profit_loss:+,.0f}</span><span style='font-size: 0.9rem;'>원</span>", unsafe_allow_html=True)
-        with info_col4:
-            profit_rate = change_info['percent']
-            rate_color = '#FF4444' if profit_rate > 0 else '#4444FF' if profit_rate < 0 else '#666666'
-            st.markdown(f"**수익률**")
-            st.markdown(f"<span style='font-size: 1.3rem; color: {rate_color};'>{profit_rate:+.2f}</span><span style='font-size: 0.9rem;'>%</span>", unsafe_allow_html=True)
-
-        # 닫기 버튼
-        if st.button("닫기", width='stretch'):
-            st.session_state[f'show_large_{stock_code}'] = False
-            st.rerun()
-
-    def render_grid(self, stocks: List[Dict], columns: int = 3):
+    def render_grid(self, stocks: List[Dict], columns: int = 3, height: int = 400):
         """
         전체 종목을 그리드로 렌더링
 
         Args:
             stocks: 종목 리스트 (이미 정렬된 상태)
             columns: 열 개수 (기본 3열)
+            height: 차트 높이 (기본 400px)
         """
         # 1단계: 모든 종목의 UI 상태 변경 감지 (차트 렌더링 전)
         any_change = False
@@ -576,20 +562,5 @@ class RealtimeChartGrid:
                 stock_idx = i + j
                 if stock_idx < len(stocks):
                     with col:
-                        self.render_stock_chart(stocks[stock_idx])
+                        self.render_stock_chart(stocks[stock_idx], height=height)
                         st.divider()
-
-        # 3단계: 마지막에 열려있는 dialog만 호출 (깜빡임 방지)
-        for stock in stocks:
-            stock_code = stock['code']
-            if st.session_state.get(f'show_large_{stock_code}', False):
-                dialog_data = st.session_state.get(f'dialog_data_{stock_code}')
-                if dialog_data:
-                    self._show_large_chart_dialog(
-                        dialog_data['stock'],
-                        dialog_data['current_price'],
-                        dialog_data['change_info'],
-                        dialog_data['chart_data'],
-                        dialog_data['timeframe'],
-                        dialog_data['is_market_open']
-                    )
