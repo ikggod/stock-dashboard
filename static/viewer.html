@@ -1107,18 +1107,60 @@ async function deleteStock(code, name) {
   buildManageList();
 }
 
-async function editStock(code) {
+function editStock(code) {
   const stock = portfolio.stocks.find(s => s.code === code);
   if (!stock) return;
+  const row = document.getElementById('manage-' + code);
+  if (!row) return;
 
-  const newPrice = prompt(`${stock.name} 평균단가 수정:`, stock.avg_price);
-  if (newPrice === null) return;
-  const newQty = prompt(`${stock.name} 보유수량 수정:`, stock.quantity);
-  if (newQty === null) return;
+  row.innerHTML = `
+    <div style="flex:1;">
+      <div style="color:#fff;font-weight:700;margin-bottom:8px;">${stock.name} <span style="color:#8892b0;font-size:0.8rem;">${stock.code}</span></div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label style="color:#8892b0;font-size:0.85rem;">평균단가
+          <input type="number" id="edit-price-${code}" value="${stock.avg_price}" style="width:120px;padding:6px 10px;background:#1a1a2e;color:#fff;border:1px solid #3b82f6;border-radius:6px;font-size:0.95rem;margin-left:4px;">
+        </label>
+        <label style="color:#8892b0;font-size:0.85rem;">수량
+          <input type="number" id="edit-qty-${code}" value="${stock.quantity}" style="width:80px;padding:6px 10px;background:#1a1a2e;color:#fff;border:1px solid #3b82f6;border-radius:6px;font-size:0.95rem;margin-left:4px;">
+        </label>
+        <span id="edit-calc-${code}" style="color:#8892b0;font-size:0.85rem;">투자금: ${fmt(stock.investment_amount)}원</span>
+      </div>
+      <div id="edit-msg-${code}" style="margin-top:4px;font-size:0.85rem;"></div>
+    </div>
+    <div class="actions" style="display:flex;gap:8px;align-items:flex-start;">
+      <button class="btn btn-primary" onclick="saveEdit('${code}')" style="padding:8px 16px;">저장</button>
+      <button class="btn" onclick="buildManageList()" style="padding:8px 16px;background:#2a2a4a;">취소</button>
+    </div>
+  `;
 
-  stock.avg_price = parseFloat(newPrice);
-  stock.quantity = parseInt(newQty);
-  stock.investment_amount = stock.avg_price * stock.quantity;
+  // 투자금 실시간 계산
+  const priceInput = document.getElementById('edit-price-' + code);
+  const qtyInput = document.getElementById('edit-qty-' + code);
+  const calcSpan = document.getElementById('edit-calc-' + code);
+  const updateCalc = () => {
+    const p = parseFloat(priceInput.value) || 0;
+    const q = parseInt(qtyInput.value) || 0;
+    calcSpan.textContent = '투자금: ' + fmt(p * q) + '원';
+  };
+  priceInput.addEventListener('input', updateCalc);
+  qtyInput.addEventListener('input', updateCalc);
+  priceInput.focus();
+  priceInput.select();
+}
+
+async function saveEdit(code) {
+  const stock = portfolio.stocks.find(s => s.code === code);
+  if (!stock) return;
+  const msgEl = document.getElementById('edit-msg-' + code);
+  const newPrice = parseFloat(document.getElementById('edit-price-' + code).value);
+  const newQty = parseInt(document.getElementById('edit-qty-' + code).value);
+
+  if (isNaN(newPrice) || newPrice <= 0) { msgEl.innerHTML = '<span style="color:#ff4757;">평균단가를 올바르게 입력하세요.</span>'; return; }
+  if (isNaN(newQty) || newQty <= 0) { msgEl.innerHTML = '<span style="color:#ff4757;">수량을 올바르게 입력하세요.</span>'; return; }
+
+  stock.avg_price = newPrice;
+  stock.quantity = newQty;
+  stock.investment_amount = newPrice * newQty;
   savePortfolio();
   await refreshAll();
   buildManageList();
