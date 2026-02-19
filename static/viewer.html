@@ -487,6 +487,7 @@ body {
   <div id="stockGrid" class="grid">
     <div class="loading"><div class="spinner"></div><br>데이터를 불러오는 중...</div>
   </div>
+  <div id="emptyChartMsg" style="display:none;"></div>
 </div>
 
 <!-- 차트 모달 -->
@@ -975,7 +976,10 @@ async function init() {
       document.getElementById('tableView').insertAdjacentHTML('beforeend', '<div id="emptyTableMsg">' + emptyMsg + '</div>');
       // 차트 뷰: 필터바+그리드 숨기고 메시지
       document.getElementById('chartFilterBar').style.display = 'none';
-      document.getElementById('stockGrid').innerHTML = emptyMsg;
+      document.getElementById('stockGrid').style.display = 'none';
+      const ecm = document.getElementById('emptyChartMsg');
+      ecm.innerHTML = emptyMsg;
+      ecm.style.display = 'block';
       return;
     }
     // 비어있을 때 추가된 메시지 제거 & 요소 복원
@@ -984,6 +988,8 @@ async function init() {
     document.querySelector('#tableView .filter-bar').style.display = '';
     document.getElementById('stockTable').style.display = '';
     document.getElementById('chartFilterBar').style.display = '';
+    document.getElementById('stockGrid').style.display = '';
+    document.getElementById('emptyChartMsg').style.display = 'none';
 
     buildGrid();
 
@@ -1231,7 +1237,10 @@ async function refreshAll() {
     let oldMsg = document.getElementById('emptyTableMsg');
     if (!oldMsg) { document.getElementById('tableView').insertAdjacentHTML('beforeend', '<div id="emptyTableMsg">' + emptyMsg + '</div>'); }
     document.getElementById('chartFilterBar').style.display = 'none';
-    document.getElementById('stockGrid').innerHTML = emptyMsg;
+    document.getElementById('stockGrid').style.display = 'none';
+    const ecm2 = document.getElementById('emptyChartMsg');
+    ecm2.innerHTML = emptyMsg;
+    ecm2.style.display = 'block';
     document.getElementById('totalInvest').textContent = '0원';
     document.getElementById('totalValue').textContent = '0원';
     document.getElementById('totalPnl').textContent = '0원';
@@ -1249,6 +1258,8 @@ async function refreshAll() {
   document.querySelector('#tableView .filter-bar').style.display = '';
   document.getElementById('stockTable').style.display = '';
   document.getElementById('chartFilterBar').style.display = '';
+  document.getElementById('stockGrid').style.display = '';
+  document.getElementById('emptyChartMsg').style.display = 'none';
 
   const prices = await loadPrices();
   buildGrid();
