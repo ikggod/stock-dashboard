@@ -270,10 +270,53 @@ async def api_chart(code: str):
         raise HTTPException(500, str(e))
 
 
+def ensure_portfolio():
+    """portfolio.json 없으면 빈 포트폴리오 생성"""
+    if not PORTFOLIO_PATH.exists():
+        save_portfolio({"stocks": [], "last_updated": ""})
+        print("[초기화] 빈 portfolio.json 생성")
+
+
+def generate_stock_list():
+    """네이버 금융에서 전체 종목 리스트 크롤링"""
+    from bs4 import BeautifulSoup as BS
+    all_stocks = []
+    for sosok in [0, 1]:  # KOSPI, KOSDAQ
+        for page in range(1, 45):
+            try:
+                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                r = requests.get(url, headers=HEADERS, timeout=10)
+                found = False
+                for a in BS(r.text, "html.parser").select("a"):
+                    href = a.get("href", "")
+                    if "main.naver?code=" in href:
+                        code = href.split("code=")[1].split("&")[0]
+                        name = a.text.strip()
+                        if name and code:
+                            all_stocks.append({"name": name, "code": code})
+                            found = True
+                if not found:
+                    break
+            except:
+                continue
+    if all_stocks:
+        with open(STOCK_LIST_PATH, "w", encoding="utf-8") as f:
+            json.dump(all_stocks, f, ensure_ascii=False)
+        print(f"[종목 리스트] {len(all_stocks)}개 생성 완료")
+    return all_stocks
+
+
 @app.on_event("startup")
 async def startup_load_stocks():
-    """서버 시작 시 종목 리스트 로드"""
-    load_stock_list()
+    """서버 시작 시 초기화"""
+    ensure_portfolio()
+    if not STOCK_LIST_PATH.exists():
+        print("[종목 리스트] stock_list.json 없음 - 생성 중 (1~2분 소요)...")
+        import threading
+        threading.Thread(target=generate_stock_list, daemon=True).start()
+        threading.Thread(target=lambda: load_stock_list() if STOCK_LIST_PATH.exists() else None, daemon=True)
+    else:
+        load_stock_list()
 
 
 if __name__ == "__main__":
