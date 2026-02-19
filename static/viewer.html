@@ -48,6 +48,8 @@ body {
   font-weight: 700;
   color: #fff;
 }
+.summary-card .value.profit { color: #ff4757; }
+.summary-card .value.loss { color: #3b82f6; }
 /* 종목 그리드 */
 .grid {
   display: grid;
@@ -551,6 +553,25 @@ body {
     <h2 style="color:#fff;margin-bottom:16px;">📝 보유 종목 관리</h2>
     <div id="manageList"></div>
   </div>
+
+  <div class="manage-section" style="margin-top:24px;">
+    <h2 style="color:#fff;margin-bottom:16px;">📋 일괄 추가</h2>
+    <p style="color:#8892b0;font-size:0.9rem;margin-bottom:8px;">한 줄에 하나씩: <b>종목코드, 평균단가, 수량</b></p>
+    <textarea id="bulkInput" style="width:100%;height:150px;background:#16213e;color:#e6e6e6;border:1px solid #2a2a4a;border-radius:8px;padding:12px;font-size:0.95rem;font-family:monospace;resize:vertical;" placeholder="005930, 72000, 10&#10;000660, 185000, 5&#10;035420, 350000, 3"></textarea>
+    <div style="display:flex;gap:12px;margin-top:8px;align-items:center;">
+      <button class="btn btn-primary" onclick="bulkAddStocks()">일괄 추가</button>
+      <span id="bulkMsg" style="font-size:0.9rem;"></span>
+    </div>
+  </div>
+
+  <div class="manage-section" style="margin-top:24px;">
+    <h2 style="color:#fff;margin-bottom:16px;">💾 백업 / 복원</h2>
+    <p style="color:#8892b0;font-size:0.9rem;margin-bottom:12px;">브라우저 캐시를 지우면 데이터가 사라집니다. 정기적으로 백업하세요.</p>
+    <div style="display:flex;gap:12px;">
+      <button class="btn btn-primary" onclick="exportPortfolio()">📤 내보내기 (백업)</button>
+      <button class="btn btn-primary" style="background:#10b981;" onclick="importPortfolio()">📥 가져오기 (복원)</button>
+    </div>
+  </div>
 </div>
 
 <div class="footer" id="footer">마지막 업데이트: -</div>
@@ -623,12 +644,20 @@ async function fetchJSON(url) {
 }
 
 async function loadPortfolio() {
-  portfolio = await fetchJSON(`${API}/api/portfolio`);
+  const saved = localStorage.getItem('portfolio_stocks');
+  const stocks = saved ? JSON.parse(saved) : [];
+  portfolio = { stocks };
   return portfolio;
 }
 
+function savePortfolio() {
+  localStorage.setItem('portfolio_stocks', JSON.stringify(portfolio.stocks));
+}
+
 async function loadPrices() {
-  return await fetchJSON(`${API}/api/prices`);
+  if (!portfolio || portfolio.stocks.length === 0) return {};
+  const codes = portfolio.stocks.map(s => s.code).join(',');
+  return await fetchJSON(`${API}/api/prices?codes=${codes}`);
 }
 
 async function loadChart(code) {
@@ -937,6 +966,25 @@ async function createChart(code, avgPrice) {
 async function init() {
   try {
     await loadPortfolio();
+
+    if (portfolio.stocks.length === 0) {
+      const emptyMsg = '<div style="color:#8892b0;text-align:center;padding:120px 20px;font-size:1.3rem;">종목이 없습니다.<br><br>⚙️ 종목 관리 탭에서 종목을 추가하세요.</div>';
+      // 테이블 뷰: 필터바+테이블 숨기고 메시지
+      document.querySelector('#tableView .filter-bar').style.display = 'none';
+      document.getElementById('stockTable').style.display = 'none';
+      document.getElementById('tableView').insertAdjacentHTML('beforeend', '<div id="emptyTableMsg">' + emptyMsg + '</div>');
+      // 차트 뷰: 필터바+그리드 숨기고 메시지
+      document.getElementById('chartFilterBar').style.display = 'none';
+      document.getElementById('stockGrid').innerHTML = emptyMsg;
+      return;
+    }
+    // 비어있을 때 추가된 메시지 제거 & 요소 복원
+    const oldMsg = document.getElementById('emptyTableMsg');
+    if (oldMsg) oldMsg.remove();
+    document.querySelector('#tableView .filter-bar').style.display = '';
+    document.getElementById('stockTable').style.display = '';
+    document.getElementById('chartFilterBar').style.display = '';
+
     buildGrid();
 
     const prices = await loadPrices();
@@ -951,6 +999,7 @@ async function init() {
 
 // 10초 실시간 갱신 (가격 + 차트 마지막 캔들)
 setInterval(async () => {
+  if (!portfolio || portfolio.stocks.length === 0) return;
   try {
     const prices = await loadPrices();
     updatePrices(prices);
@@ -1021,45 +1070,38 @@ async function addStock() {
   if (!avg_price || avg_price <= 0) { msg.innerHTML = '<span class="loss">평균단가를 입력하세요</span>'; return; }
   if (!quantity || quantity <= 0) { msg.innerHTML = '<span class="loss">보유수량을 입력하세요</span>'; return; }
 
-  try {
-    const r = await fetch(`${API}/api/stock`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, code, avg_price, quantity })
-    });
-    const data = await r.json();
-    if (r.ok) {
-      msg.innerHTML = `<span class="profit">✅ ${data.message}</span>`;
-      // 폼 초기화
-      document.getElementById('searchInput').value = '';
-      document.getElementById('addName').value = '';
-      document.getElementById('addCode').value = '';
-      document.getElementById('addAvgPrice').value = '';
-      document.getElementById('addQuantity').value = '';
-      // 데이터 새로고침
-      await refreshAll();
-      buildManageList();
-    } else {
-      msg.innerHTML = `<span class="loss">❌ ${data.detail || '추가 실패'}</span>`;
-    }
-  } catch(e) {
-    msg.innerHTML = `<span class="loss">❌ 오류: ${e.message}</span>`;
+  // 중복 체크
+  if (portfolio.stocks.some(s => s.code === code)) {
+    msg.innerHTML = '<span class="loss">❌ 이미 등록된 종목입니다</span>';
+    return;
   }
+
+  portfolio.stocks.push({
+    name, code, avg_price, quantity,
+    investment_amount: avg_price * quantity,
+    added_date: new Date().toISOString()
+  });
+  savePortfolio();
+
+  msg.innerHTML = `<span class="profit">✅ ${name} 추가 완료</span>`;
+  document.getElementById('searchInput').value = '';
+  document.getElementById('addName').value = '';
+  document.getElementById('addCode').value = '';
+  document.getElementById('addAvgPrice').value = '';
+  document.getElementById('addQuantity').value = '';
+  await refreshAll();
+  buildManageList();
 }
 
 async function deleteStock(code, name) {
   if (!confirm(`${name}을(를) 삭제하시겠습니까?`)) return;
-  try {
-    const r = await fetch(`${API}/api/stock/${code}`, { method: 'DELETE' });
-    if (r.ok) {
-      await refreshAll();
-      buildManageList();
-    }
-  } catch(e) { alert('삭제 실패: ' + e.message); }
+  portfolio.stocks = portfolio.stocks.filter(s => s.code !== code);
+  savePortfolio();
+  await refreshAll();
+  buildManageList();
 }
 
 async function editStock(code) {
-  const row = document.getElementById(`manage-${code}`);
   const stock = portfolio.stocks.find(s => s.code === code);
   if (!stock) return;
 
@@ -1068,22 +1110,103 @@ async function editStock(code) {
   const newQty = prompt(`${stock.name} 보유수량 수정:`, stock.quantity);
   if (newQty === null) return;
 
-  try {
-    const r = await fetch(`${API}/api/stock/${code}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ avg_price: parseFloat(newPrice), quantity: parseInt(newQty) })
-    });
-    if (r.ok) {
+  stock.avg_price = parseFloat(newPrice);
+  stock.quantity = parseInt(newQty);
+  stock.investment_amount = stock.avg_price * stock.quantity;
+  savePortfolio();
+  await refreshAll();
+  buildManageList();
+}
+
+function exportPortfolio() {
+  const data = JSON.stringify(portfolio.stocks, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `portfolio_backup_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importPortfolio() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let parsed = JSON.parse(text);
+      // {stocks: [...]} 형식도 지원 (portfolio.json 호환)
+      let stocks = Array.isArray(parsed) ? parsed : (parsed.stocks && Array.isArray(parsed.stocks) ? parsed.stocks : null);
+      if (!stocks) { alert('올바른 포트폴리오 파일이 아닙니다.'); return; }
+      portfolio.stocks = stocks;
+      savePortfolio();
       await refreshAll();
       buildManageList();
+      alert(`✅ ${stocks.length}개 종목 가져오기 완료`);
+    } catch(err) { alert('파일 읽기 실패: ' + err.message); }
+  };
+  input.click();
+}
+
+async function bulkAddStocks() {
+  const text = document.getElementById('bulkInput').value.trim();
+  const msg = document.getElementById('bulkMsg');
+  if (!text) { msg.innerHTML = '<span style="color:#ff4757;">입력값이 없습니다.</span>'; return; }
+
+  const lines = text.split('\n').filter(l => l.trim());
+  let added = 0, failed = 0, errors = [];
+
+  for (const line of lines) {
+    const parts = line.split(/[,\t\s]+/).map(s => s.trim()).filter(Boolean);
+    if (parts.length < 3) { failed++; errors.push(line.trim() + ' (형식오류)'); continue; }
+
+    let [code, priceStr, qtyStr] = parts;
+    code = code.replace(/[^0-9]/g, '').padStart(6, '0');
+    const avg_price = parseFloat(priceStr);
+    const quantity = parseInt(qtyStr);
+
+    if (!code || isNaN(avg_price) || isNaN(quantity) || avg_price <= 0 || quantity <= 0) {
+      failed++; errors.push(line.trim() + ' (숫자오류)'); continue;
     }
-  } catch(e) { alert('수정 실패: ' + e.message); }
+
+    // 중복 체크
+    if (portfolio.stocks.find(s => s.code === code)) {
+      failed++; errors.push(code + ' (이미 존재)'); continue;
+    }
+
+    // 종목명 조회
+    let name = code;
+    try {
+      const res = await fetch(API + '/api/search?q=' + code);
+      const list = await res.json();
+      const match = list.find(s => s.code === code);
+      if (match) name = match.name;
+    } catch(e) {}
+
+    portfolio.stocks.push({ name, code, avg_price, quantity, investment_amount: avg_price * quantity, added_date: new Date().toISOString() });
+    added++;
+  }
+
+  savePortfolio();
+  await refreshAll();
+  buildManageList();
+
+  let result = `<span class="profit">✅ ${added}개 추가 완료</span>`;
+  if (failed > 0) result += `<span style="color:#ff4757;margin-left:8px;">❌ ${failed}개 실패: ${errors.join(', ')}</span>`;
+  msg.innerHTML = result;
+  if (added > 0) document.getElementById('bulkInput').value = '';
 }
 
 function buildManageList() {
   const list = document.getElementById('manageList');
-  if (!portfolio || !portfolio.stocks) { list.innerHTML = '<div style="color:#8892b0;">종목이 없습니다.</div>'; return; }
+  if (!portfolio || !portfolio.stocks || portfolio.stocks.length === 0) {
+    list.innerHTML = '<div style="color:#8892b0;text-align:center;padding:24px;">종목이 없습니다. 위에서 종목을 추가하세요.</div>';
+    return;
+  }
   list.innerHTML = portfolio.stocks.map(s => `
     <div class="manage-row" id="manage-${s.code}">
       <div class="info">
@@ -1100,15 +1223,48 @@ function buildManageList() {
 
 async function refreshAll() {
   await loadPortfolio();
+
+  if (portfolio.stocks.length === 0) {
+    const emptyMsg = '<div style="color:#8892b0;text-align:center;padding:120px 20px;font-size:1.3rem;">종목이 없습니다.<br><br>⚙️ 종목 관리 탭에서 종목을 추가하세요.</div>';
+    document.querySelector('#tableView .filter-bar').style.display = 'none';
+    document.getElementById('stockTable').style.display = 'none';
+    let oldMsg = document.getElementById('emptyTableMsg');
+    if (!oldMsg) { document.getElementById('tableView').insertAdjacentHTML('beforeend', '<div id="emptyTableMsg">' + emptyMsg + '</div>'); }
+    document.getElementById('chartFilterBar').style.display = 'none';
+    document.getElementById('stockGrid').innerHTML = emptyMsg;
+    document.getElementById('totalInvest').textContent = '0원';
+    document.getElementById('totalValue').textContent = '0원';
+    document.getElementById('totalPnl').textContent = '0원';
+    document.getElementById('totalReturn').textContent = '0.00%';
+    currentPrices = {};
+    chartsLoaded = false;
+    for (const c of Object.values(charts)) { try { c.remove(); } catch(e){} }
+    charts = {};
+    chartSeries = {};
+    return;
+  }
+  // 비어있을 때 추가된 요소 복원
+  const oldMsg2 = document.getElementById('emptyTableMsg');
+  if (oldMsg2) oldMsg2.remove();
+  document.querySelector('#tableView .filter-bar').style.display = '';
+  document.getElementById('stockTable').style.display = '';
+  document.getElementById('chartFilterBar').style.display = '';
+
   const prices = await loadPrices();
   buildGrid();
   updatePrices(prices);
   updateSummary(prices);
   buildTable(prices);
-  // 차트 리셋
+  for (const c of Object.values(charts)) { try { c.remove(); } catch(e){} }
   chartsLoaded = false;
   charts = {};
   chartSeries = {};
+
+  // 차트 탭이 현재 열려있으면 바로 다시 로드
+  if (document.getElementById('chartView').style.display === 'block') {
+    chartsLoaded = true;
+    loadAllCharts();
+  }
 }
 
 // 검색결과 외부 클릭 시 닫기

@@ -1,6 +1,8 @@
 """
 주식 포트폴리오 경량 뷰어 - FastAPI 백엔드
 부모님용 대시보드 서버 (포트 8502)
+- 가격 조회, 차트 데이터, 종목 검색만 담당
+- 포트폴리오 데이터는 브라우저 localStorage에서 관리
 """
 
 import json
@@ -25,7 +27,6 @@ app.add_middleware(
 )
 
 BASE_DIR = Path(__file__).parent
-PORTFOLIO_PATH = BASE_DIR / "portfolio.json"
 STATIC_DIR = BASE_DIR / "static"
 
 HEADERS = {
@@ -33,13 +34,8 @@ HEADERS = {
 }
 
 # 가격 캐시
-_price_cache = {"data": None, "timestamp": 0}
+_price_cache = {"data": None, "timestamp": 0, "key": ""}
 CACHE_TTL = 10  # 초 (실시간 모드)
-
-
-def load_portfolio() -> dict:
-    with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def fetch_price(code: str) -> dict:
@@ -54,7 +50,6 @@ def fetch_price(code: str) -> dict:
             return {"code": code, "price": None, "error": "가격 요소를 찾을 수 없음"}
         price = int(el.text.strip().replace(",", ""))
 
-        # 전일대비 변동
         change_el = soup.select_one(".no_exday .blind")
         change = 0
         if change_el:
@@ -63,7 +58,6 @@ def fetch_price(code: str) -> dict:
             except ValueError:
                 pass
 
-        # 등락 방향
         no_exday = soup.select_one(".no_exday")
         if no_exday:
             if "nv_down" in str(no_exday) or "dl_dnx" in str(no_exday.parent) or no_exday.select_one(".ico.down_sm"):
@@ -91,36 +85,26 @@ async def index():
     return FileResponse(html_path, media_type="text/html")
 
 
-@app.get("/api/portfolio")
-async def api_portfolio():
-    try:
-        data = load_portfolio()
-        return JSONResponse(data)
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
 @app.get("/api/prices")
-async def api_prices():
+async def api_prices(codes: str = ""):
+    if not codes:
+        return JSONResponse({})
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list:
+        return JSONResponse({})
+
+    cache_key = ",".join(sorted(code_list))
     now = time.time()
-    if _price_cache["data"] and (now - _price_cache["timestamp"]) < CACHE_TTL:
+    if _price_cache.get("key") == cache_key and _price_cache["data"] and (now - _price_cache["timestamp"]) < CACHE_TTL:
         return JSONResponse(_price_cache["data"])
 
-    try:
-        portfolio = load_portfolio()
-        codes = [s["code"] for s in portfolio["stocks"]]
-        prices = fetch_all_prices(codes)
-        result = {p["code"]: p for p in prices}
-        _price_cache["data"] = result
-        _price_cache["timestamp"] = now
-        return JSONResponse(result)
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-def save_portfolio(data: dict):
-    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    prices = fetch_all_prices(code_list)
+    result = {p["code"]: p for p in prices}
+    _price_cache["data"] = result
+    _price_cache["timestamp"] = now
+    _price_cache["key"] = cache_key
+    return JSONResponse(result)
 
 
 # 종목 리스트 (로컬 파일에서 로드)
@@ -161,87 +145,6 @@ async def api_search(q: str = ""):
     return JSONResponse(results)
 
 
-@app.post("/api/stock")
-async def api_add_stock(request: dict):
-    """종목 추가"""
-    try:
-        portfolio = load_portfolio()
-        name = request.get("name", "").strip()
-        code = str(request.get("code", "")).strip().zfill(6)
-        avg_price = float(request.get("avg_price", 0))
-        quantity = int(request.get("quantity", 0))
-
-        if not name or not code or avg_price <= 0 or quantity <= 0:
-            raise HTTPException(400, "필수 항목을 모두 입력하세요")
-
-        # 중복 체크
-        for s in portfolio["stocks"]:
-            if s["code"] == code:
-                raise HTTPException(400, f"이미 등록된 종목입니다: {name}")
-
-        from datetime import datetime
-        portfolio["stocks"].append({
-            "name": name,
-            "code": code,
-            "avg_price": avg_price,
-            "quantity": quantity,
-            "investment_amount": avg_price * quantity,
-            "added_date": datetime.now().isoformat(),
-        })
-        portfolio["last_updated"] = datetime.now().isoformat()
-        save_portfolio(portfolio)
-        _price_cache["data"] = None  # 캐시 초기화
-        return JSONResponse({"ok": True, "message": f"{name} 추가 완료"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-@app.put("/api/stock/{code}")
-async def api_update_stock(code: str, request: dict):
-    """종목 수정"""
-    try:
-        portfolio = load_portfolio()
-        for s in portfolio["stocks"]:
-            if s["code"] == code:
-                if "avg_price" in request:
-                    s["avg_price"] = float(request["avg_price"])
-                if "quantity" in request:
-                    s["quantity"] = int(request["quantity"])
-                s["investment_amount"] = s["avg_price"] * s["quantity"]
-                from datetime import datetime
-                portfolio["last_updated"] = datetime.now().isoformat()
-                save_portfolio(portfolio)
-                _price_cache["data"] = None
-                return JSONResponse({"ok": True, "message": f"{s['name']} 수정 완료"})
-        raise HTTPException(404, "종목을 찾을 수 없습니다")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-@app.delete("/api/stock/{code}")
-async def api_delete_stock(code: str):
-    """종목 삭제"""
-    try:
-        portfolio = load_portfolio()
-        original_len = len(portfolio["stocks"])
-        portfolio["stocks"] = [s for s in portfolio["stocks"] if s["code"] != code]
-        if len(portfolio["stocks"]) == original_len:
-            raise HTTPException(404, "종목을 찾을 수 없습니다")
-        from datetime import datetime
-        portfolio["last_updated"] = datetime.now().isoformat()
-        save_portfolio(portfolio)
-        _price_cache["data"] = None
-        return JSONResponse({"ok": True, "message": "삭제 완료"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
 @app.get("/api/chart/{code}")
 async def api_chart(code: str):
     try:
@@ -254,8 +157,7 @@ async def api_chart(code: str):
         for item in items:
             data = item.get("data", "").split("|")
             if len(data) >= 5:
-                # date|open|high|low|close|volume
-                date_str = data[0]  # YYYYMMDD
+                date_str = data[0]
                 formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
                 candles.append({
                     "time": formatted,
@@ -270,18 +172,11 @@ async def api_chart(code: str):
         raise HTTPException(500, str(e))
 
 
-def ensure_portfolio():
-    """portfolio.json 없으면 빈 포트폴리오 생성"""
-    if not PORTFOLIO_PATH.exists():
-        save_portfolio({"stocks": [], "last_updated": ""})
-        print("[초기화] 빈 portfolio.json 생성")
-
-
 def generate_stock_list():
     """네이버 금융에서 전체 종목 리스트 크롤링"""
     from bs4 import BeautifulSoup as BS
     all_stocks = []
-    for sosok in [0, 1]:  # KOSPI, KOSDAQ
+    for sosok in [0, 1]:
         for page in range(1, 45):
             try:
                 url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
@@ -306,17 +201,22 @@ def generate_stock_list():
     return all_stocks
 
 
+def _refresh_stock_list():
+    """백그라운드에서 최신 종목 목록 갱신"""
+    import time
+    generate_stock_list()
+    load_stock_list()
+    print("[종목 리스트] 최신 동기화 완료")
+
+
 @app.on_event("startup")
 async def startup_load_stocks():
-    """서버 시작 시 초기화"""
-    ensure_portfolio()
-    if not STOCK_LIST_PATH.exists():
-        print("[종목 리스트] stock_list.json 없음 - 생성 중 (1~2분 소요)...")
-        import threading
-        threading.Thread(target=generate_stock_list, daemon=True).start()
-        threading.Thread(target=lambda: load_stock_list() if STOCK_LIST_PATH.exists() else None, daemon=True)
-    else:
-        load_stock_list()
+    """서버 시작 시 초기화 - 기존 파일 로드 후 백그라운드 갱신"""
+    import threading
+    if STOCK_LIST_PATH.exists():
+        load_stock_list()  # 일단 기존 파일로 빠르게 서비스 시작
+    print("[종목 리스트] 백그라운드에서 최신 목록 동기화 중...")
+    threading.Thread(target=_refresh_stock_list, daemon=True).start()
 
 
 if __name__ == "__main__":
