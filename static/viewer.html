@@ -1169,22 +1169,30 @@ async function bulkAddStocks() {
 
   for (const line of lines) {
     const parts = line.split(/[,\t]+/).map(s => s.trim()).filter(Boolean);
-    if (parts.length < 3) { failed++; errors.push(line.trim() + ' (형식오류)'); continue; }
+    if (parts.length < 3) { failed++; errors.push(`"${line.trim()}" → 콤마로 3개 항목 구분 필요 (종목명, 평균단가, 수량)`); continue; }
 
     let [nameOrCode, priceStr, qtyStr] = parts;
     const avg_price = parseFloat(priceStr);
     const quantity = parseInt(qtyStr);
 
-    if (isNaN(avg_price) || isNaN(quantity) || avg_price <= 0 || quantity <= 0) {
-      failed++; errors.push(nameOrCode + ' (숫자오류)'); continue;
+    if (isNaN(avg_price) || isNaN(quantity)) {
+      failed++; errors.push(`"${nameOrCode}" → 평균단가(${priceStr}) 또는 수량(${qtyStr})이 숫자가 아님`); continue;
+    }
+    if (avg_price <= 0) {
+      failed++; errors.push(`"${nameOrCode}" → 평균단가(${priceStr})가 0 이하`); continue;
+    }
+    if (quantity <= 0) {
+      failed++; errors.push(`"${nameOrCode}" → 수량(${qtyStr})이 0 이하`); continue;
     }
 
     let code = '', name = '';
-    const isCode = /^\d{4,6}$/.test(nameOrCode.trim());
+    // 영문은 대문자로 변환
+    nameOrCode = nameOrCode.trim();
+    const isCode = /^\d{4,6}$/.test(nameOrCode);
+    const searchTerm = /^[a-zA-Z]/.test(nameOrCode) ? nameOrCode.toUpperCase() : nameOrCode;
 
     if (isCode) {
-      // 숫자면 종목코드로 처리
-      code = nameOrCode.trim().padStart(6, '0');
+      code = nameOrCode.padStart(6, '0');
       try {
         const res = await fetch(API + '/api/search?q=' + code);
         const list = await res.json();
@@ -1192,25 +1200,24 @@ async function bulkAddStocks() {
         name = match ? match.name : code;
       } catch(e) { name = code; }
     } else {
-      // 한글/영문이면 종목명으로 검색
       try {
-        const res = await fetch(API + '/api/search?q=' + encodeURIComponent(nameOrCode.trim()));
+        const res = await fetch(API + '/api/search?q=' + encodeURIComponent(searchTerm));
         const list = await res.json();
-        // 정확히 일치하는 종목 우선, 없으면 첫 번째 결과
-        const exact = list.find(s => s.name === nameOrCode.trim());
+        // 대소문자 무시 정확 매칭 우선
+        const exact = list.find(s => s.name.toUpperCase() === searchTerm.toUpperCase());
         const match = exact || list[0];
         if (match) {
           code = match.code;
           name = match.name;
         } else {
-          failed++; errors.push(nameOrCode + ' (종목 못찾음)'); continue;
+          failed++; errors.push(`"${nameOrCode}" → 종목을 찾을 수 없음 (오타 확인)`); continue;
         }
-      } catch(e) { failed++; errors.push(nameOrCode + ' (검색실패)'); continue; }
+      } catch(e) { failed++; errors.push(`"${nameOrCode}" → 서버 검색 실패`); continue; }
     }
 
     // 중복 체크
     if (portfolio.stocks.find(s => s.code === code)) {
-      failed++; errors.push(name + ' (이미 존재)'); continue;
+      failed++; errors.push(`"${name}" → 이미 추가된 종목`); continue;
     }
 
     portfolio.stocks.push({ name, code, avg_price, quantity, investment_amount: avg_price * quantity, added_date: new Date().toISOString() });
@@ -1222,7 +1229,7 @@ async function bulkAddStocks() {
   buildManageList();
 
   let result = `<span class="profit">✅ ${added}개 추가 완료</span>`;
-  if (failed > 0) result += `<span style="color:#ff4757;margin-left:8px;">❌ ${failed}개 실패: ${errors.join(', ')}</span>`;
+  if (failed > 0) result += `<div style="color:#ff4757;margin-top:8px;font-size:0.9rem;">❌ ${failed}개 실패:<br>${errors.map(e => '&nbsp;&nbsp;• ' + e).join('<br>')}</div>`;
   msg.innerHTML = result;
   if (added > 0) document.getElementById('bulkInput').value = '';
 }
