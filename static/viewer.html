@@ -557,8 +557,8 @@ body {
 
   <div class="manage-section" style="margin-top:24px;">
     <h2 style="color:#fff;margin-bottom:16px;">📋 일괄 추가</h2>
-    <p style="color:#8892b0;font-size:0.9rem;margin-bottom:8px;">한 줄에 하나씩: <b>종목코드, 평균단가, 수량</b></p>
-    <textarea id="bulkInput" style="width:100%;height:150px;background:#16213e;color:#e6e6e6;border:1px solid #2a2a4a;border-radius:8px;padding:12px;font-size:0.95rem;font-family:monospace;resize:vertical;" placeholder="005930, 72000, 10&#10;000660, 185000, 5&#10;035420, 350000, 3"></textarea>
+    <p style="color:#8892b0;font-size:0.9rem;margin-bottom:8px;">한 줄에 하나씩: <b>종목명(또는 코드), 평균단가, 수량</b></p>
+    <textarea id="bulkInput" style="width:100%;height:150px;background:#16213e;color:#e6e6e6;border:1px solid #2a2a4a;border-radius:8px;padding:12px;font-size:0.95rem;font-family:monospace;resize:vertical;" placeholder="삼성전자, 72000, 10&#10;SK하이닉스, 185000, 5&#10;NAVER, 350000, 3"></textarea>
     <div style="display:flex;gap:12px;margin-top:8px;align-items:center;">
       <button class="btn btn-primary" onclick="bulkAddStocks()">일괄 추가</button>
       <span id="bulkMsg" style="font-size:0.9rem;"></span>
@@ -1163,35 +1163,55 @@ async function bulkAddStocks() {
   const msg = document.getElementById('bulkMsg');
   if (!text) { msg.innerHTML = '<span style="color:#ff4757;">입력값이 없습니다.</span>'; return; }
 
+  msg.innerHTML = '<span style="color:#8892b0;">⏳ 종목 검색 중...</span>';
   const lines = text.split('\n').filter(l => l.trim());
   let added = 0, failed = 0, errors = [];
 
   for (const line of lines) {
-    const parts = line.split(/[,\t\s]+/).map(s => s.trim()).filter(Boolean);
+    const parts = line.split(/[,\t]+/).map(s => s.trim()).filter(Boolean);
     if (parts.length < 3) { failed++; errors.push(line.trim() + ' (형식오류)'); continue; }
 
-    let [code, priceStr, qtyStr] = parts;
-    code = code.replace(/[^0-9]/g, '').padStart(6, '0');
+    let [nameOrCode, priceStr, qtyStr] = parts;
     const avg_price = parseFloat(priceStr);
     const quantity = parseInt(qtyStr);
 
-    if (!code || isNaN(avg_price) || isNaN(quantity) || avg_price <= 0 || quantity <= 0) {
-      failed++; errors.push(line.trim() + ' (숫자오류)'); continue;
+    if (isNaN(avg_price) || isNaN(quantity) || avg_price <= 0 || quantity <= 0) {
+      failed++; errors.push(nameOrCode + ' (숫자오류)'); continue;
+    }
+
+    let code = '', name = '';
+    const isCode = /^\d{4,6}$/.test(nameOrCode.trim());
+
+    if (isCode) {
+      // 숫자면 종목코드로 처리
+      code = nameOrCode.trim().padStart(6, '0');
+      try {
+        const res = await fetch(API + '/api/search?q=' + code);
+        const list = await res.json();
+        const match = list.find(s => s.code === code);
+        name = match ? match.name : code;
+      } catch(e) { name = code; }
+    } else {
+      // 한글/영문이면 종목명으로 검색
+      try {
+        const res = await fetch(API + '/api/search?q=' + encodeURIComponent(nameOrCode.trim()));
+        const list = await res.json();
+        // 정확히 일치하는 종목 우선, 없으면 첫 번째 결과
+        const exact = list.find(s => s.name === nameOrCode.trim());
+        const match = exact || list[0];
+        if (match) {
+          code = match.code;
+          name = match.name;
+        } else {
+          failed++; errors.push(nameOrCode + ' (종목 못찾음)'); continue;
+        }
+      } catch(e) { failed++; errors.push(nameOrCode + ' (검색실패)'); continue; }
     }
 
     // 중복 체크
     if (portfolio.stocks.find(s => s.code === code)) {
-      failed++; errors.push(code + ' (이미 존재)'); continue;
+      failed++; errors.push(name + ' (이미 존재)'); continue;
     }
-
-    // 종목명 조회
-    let name = code;
-    try {
-      const res = await fetch(API + '/api/search?q=' + code);
-      const list = await res.json();
-      const match = list.find(s => s.code === code);
-      if (match) name = match.name;
-    } catch(e) {}
 
     portfolio.stocks.push({ name, code, avg_price, quantity, investment_amount: avg_price * quantity, added_date: new Date().toISOString() });
     added++;
